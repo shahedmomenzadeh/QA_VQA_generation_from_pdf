@@ -1,0 +1,7 @@
+PyMuPDF
+pandas
+Pillow
+pytesseract
+langgraph
+langchain
+langchain_ollama
