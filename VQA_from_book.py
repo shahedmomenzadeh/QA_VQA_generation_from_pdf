@@ -10,6 +10,7 @@ Key fixes included:
 - Kept original LangGraph synchronous workflow structure.
 - Modified for table QA: added 3-page context window + table name, relevance check, no table name or path in QA, combined with text QA in one JSONL.
 - Modified for VQA: no figure name in QA, general questions for VLM finetuning phrased with 'in this figure' or 'in the image', include image_path in separate JSONL.
+- Added quality check nodes for QA and VQA to filter non-medical content (e.g., authors, non-medical topics).
 
 NOTE: Adjust the VLM "HumanMessage" payload fields (image_url / image_base64) to match
 your ChatOllama / VLM client's expected schema. Look for comments marked: "ADJUST HERE".
@@ -109,7 +110,7 @@ def parse_qa_from_string(text_response: str) -> List[dict]:
 
 
 # -----------------------------------------------------------------------------
-# 4. Prompts (updated with table and figure QA to avoid specific names)
+# 4. Prompts (updated with quality check prompts)
 # -----------------------------------------------------------------------------
 
 class Prompts:
@@ -211,6 +212,28 @@ ANSWER: [your answer here]
 {markdown_table}
 ---""",
         input_variables=["context_text", "markdown_table"],
+    )
+
+    QA_QUALITY_CHECK = PromptTemplate(
+        template="""You are a Cataract surgery expert evaluating the quality of a question-answer pair for medical training data.
+
+Given the question: "{question}"
+
+Is this question specifically about medical content related to Cataract surgery (e.g., techniques, complications, procedures, anatomy, outcomes)? It should not be about non-medical topics like authors, acknowledgments, page numbers, or general book info.
+
+Respond ONLY with 'true' if it is a high-quality medical QA pair, or 'false' if not.""",
+        input_variables=["question"],
+    )
+
+    VQA_QUALITY_CHECK = PromptTemplate(
+        template="""You are a Cataract surgery expert evaluating the quality of a Visual Question-Answering pair for medical training data.
+
+Given the question: "{question}"
+
+Is this question specifically about medical content related to Cataract surgery (e.g., techniques, complications, procedures, anatomy, outcomes shown in the figure/image)? It should be phrased referring to 'this figure', 'the image', etc., and not about non-medical topics like authors, acknowledgments, or general book info.
+
+Respond ONLY with 'true' if it is a high-quality medical VQA pair, or 'false' if not.""",
+        input_variables=["question"],
     )
 
 
@@ -504,6 +527,72 @@ def generate_vqa_node(state: PipelineState) -> dict:
     }
 
 
+def qa_quality_check_node(state: PipelineState) -> dict:
+    """Quality check for QA pairs to ensure they are medical-related."""
+    if Config.LLM is None:
+        print("⚠️ LLM is not available; skipping QA quality check.")
+        return state
+
+    print(f"🔍 Quality checking {len(state['qa_pairs'])} QA pairs...")
+    chain = Prompts.QA_QUALITY_CHECK | Config.LLM | StrOutputParser()
+    filtered_qa = []
+
+    for pair in state['qa_pairs']:
+        try:
+            result = chain.invoke({"question": pair["question"]})
+            if result.strip().lower() == 'true':
+                filtered_qa.append(pair)
+            else:
+                print(f"  - Filtered out non-medical QA: {pair['question'][:100]}...")
+        except Exception as e:
+            print(f"⚠️ Error during QA quality check: {e}")
+            # Keep the pair if check fails
+            filtered_qa.append(pair)
+
+    updated_qa_count = state["qa_count"] - (len(state['qa_pairs']) - len(filtered_qa))
+    updated_qa_per_book = state["qa_count_per_book"] - (len(state['qa_pairs']) - len(filtered_qa))
+    print(f"✅ Kept {len(filtered_qa)} high-quality QA pairs after filtering.")
+
+    return {
+        "qa_pairs": filtered_qa,
+        "qa_count": updated_qa_count,
+        "qa_count_per_book": updated_qa_per_book,
+    }
+
+
+def vqa_quality_check_node(state: PipelineState) -> dict:
+    """Quality check for VQA pairs to ensure they are medical-related and properly phrased."""
+    if Config.LLM is None:
+        print("⚠️ LLM is not available; skipping VQA quality check.")
+        return state
+
+    print(f"🔍 Quality checking {len(state['vqa_pairs'])} VQA pairs...")
+    chain = Prompts.VQA_QUALITY_CHECK | Config.LLM | StrOutputParser()
+    filtered_vqa = []
+
+    for pair in state['vqa_pairs']:
+        try:
+            result = chain.invoke({"question": pair["question"]})
+            if result.strip().lower() == 'true':
+                filtered_vqa.append(pair)
+            else:
+                print(f"  - Filtered out non-medical VQA: {pair['question'][:100]}...")
+        except Exception as e:
+            print(f"⚠️ Error during VQA quality check: {e}")
+            # Keep the pair if check fails
+            filtered_vqa.append(pair)
+
+    updated_vqa_count = state["vqa_count"] - (len(state['vqa_pairs']) - len(filtered_vqa))
+    updated_vqa_per_book = state["vqa_count_per_book"] - (len(state['vqa_pairs']) - len(filtered_vqa))
+    print(f"✅ Kept {len(filtered_vqa)} high-quality VQA pairs after filtering.")
+
+    return {
+        "vqa_pairs": filtered_vqa,
+        "vqa_count": updated_vqa_count,
+        "vqa_count_per_book": updated_vqa_per_book,
+    }
+
+
 # -----------------------------------------------------------------------------
 # 9. Robust table QA node (no table_path in QA pairs)
 # -----------------------------------------------------------------------------
@@ -607,16 +696,18 @@ def generate_table_qa_node(state: PipelineState) -> dict:
 
 
 # -----------------------------------------------------------------------------
-# 10. Workflow graph and execution
+# 10. Workflow graph and execution (added quality check nodes)
 # -----------------------------------------------------------------------------
 
 workflow = StateGraph(PipelineState)
 workflow.add_node("parse", RunnableLambda(parse_current_book_node))
 workflow.add_node("table_relevance_check", RunnableLambda(table_relevance_check_node))
 workflow.add_node("image_relevance_check", RunnableLambda(image_relevance_check_node))
-workflow.add_node("generate_qa", RunnableLambda(generate_qa_node))
 workflow.add_node("generate_vqa", RunnableLambda(generate_vqa_node))
+workflow.add_node("vqa_quality_check", RunnableLambda(vqa_quality_check_node))
+workflow.add_node("generate_qa", RunnableLambda(generate_qa_node))
 workflow.add_node("generate_table_qa", RunnableLambda(generate_table_qa_node))
+workflow.add_node("qa_quality_check", RunnableLambda(qa_quality_check_node))
 
 
 def advance_to_next_book(state: PipelineState) -> dict:
@@ -627,8 +718,10 @@ workflow.set_entry_point("parse")
 workflow.add_edge("parse", "table_relevance_check")
 workflow.add_edge("table_relevance_check", "image_relevance_check")
 workflow.add_edge("image_relevance_check", "generate_vqa")
-workflow.add_edge("generate_vqa", "generate_qa")
+workflow.add_edge("generate_vqa", "vqa_quality_check")
+workflow.add_edge("vqa_quality_check", "generate_qa")
 workflow.add_edge("generate_qa", "generate_table_qa")
+workflow.add_edge("generate_table_qa", "qa_quality_check")
 
 
 def book_router(state: PipelineState) -> str:
@@ -639,7 +732,7 @@ def book_router(state: PipelineState) -> str:
     print(f"🏁 Finished book {state['current_book_index'] + 1}. Moving to next...")
     return "next_book"
 
-workflow.add_conditional_edges("generate_table_qa", book_router, {"next_book": "advance_book", END: END})
+workflow.add_conditional_edges("qa_quality_check", book_router, {"next_book": "advance_book", END: END})
 workflow.add_edge("advance_book", "parse")
 
 app = workflow.compile()

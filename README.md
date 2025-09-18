@@ -1,7 +1,12 @@
 # VQA from Book - Cataract Surgery Data Generation Pipeline
 
+
 ## Overview
 This project provides a robust pipeline for generating Question-Answer (QA), Visual Question-Answer (VQA), and Table QA data from medical textbooks in PDF format, specifically focused on Cataract Surgery. The script processes PDF books, extracts text, figures, and tables, and uses large language models (LLMs) and vision-language models (VLMs) to generate high-quality Q&A pairs for research and training purposes.
+
+## Pipeline Flowchart
+![VQA/QA Pipeline Flowchart](flowchart_VQA_QA.png)
+*Figure: Flowchart of the VQA/QA data generation pipeline.*
 
 ## Features
 - Extracts text, figures, and tables from PDF textbooks
@@ -63,4 +68,4 @@ You can adjust pipeline options (e.g., enable/disable text QA, VQA, table QA, or
 - For OCR issues, verify that Tesseract is installed and accessible.
 
 ## License
-This project is for academic and research use. Please cite appropriately if used in publications.
+Do whatever you want with it.
