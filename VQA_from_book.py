@@ -1,11 +1,12 @@
 """
 VLM Data Generation Pipeline for Cataract Surgery Textbooks
 
-Rewritten full script with robust table and figure handling and fallbacks.
+Rewritten full script with robust table and figure handling, fallbacks, and skipping vertical tables.
 Key fixes included:
 - Save table and figure images as ABSOLUTE paths and immediately verify existence.
 - Do NOT rely on file:// URIs; prefer plain absolute path or base64 image payloads.
 - VLM invocation: try path-mode, then base64-mode, then local pytesseract fallback.
+- Added orientation detection to skip vertical tables using pytesseract OSD.
 - Added helpful logging so you can trace missing file issues.
 - Kept original LangGraph synchronous workflow structure.
 - Modified for table QA: added 3-page context window + table name, relevance check, no table name or path in QA, combined with text QA in one JSONL.
@@ -50,18 +51,18 @@ from langchain_core.messages import HumanMessage
 class Config:
     """Holds all configuration for the data generation pipeline."""
     # --- Module Controls ---
-    RUN_TEXT_QA = True  # Enabled for text QA
+    RUN_TEXT_QA = True # Enabled for text QA
     RUN_VQA = True
     RUN_TABLE_QA = True
 
     # --- Model Configuration ---
     LLM_MODEL = "qwen2.5vl:7b"
-    VLM_MODEL = "qwen2.5vl:7b"
+    VLM_MODEL = "granite3.2-vision:2b"
 
     # Instantiate models in a try/except so local runs don't fail silently
     try:
-        LLM = ChatOllama(model=LLM_MODEL, temperature=0.0)
-        VLM = ChatOllama(model=VLM_MODEL, temperature=0.0)
+        LLM = ChatOllama(model=LLM_MODEL, temperature=0.0, max_tokens=2048)
+        VLM = ChatOllama(model=VLM_MODEL, temperature=0.0, max_tokens=256)
     except Exception as e:
         print("⚠️ Warning: could not instantiate ChatOllama models:", e)
         LLM = None
@@ -81,6 +82,50 @@ class Config:
 
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
+
+
+def detect_vertical_table(image_path: str, min_confidence: float = 0.3) -> str:
+    """
+    Detects if the table image is vertical (rotated) using pytesseract OSD. 
+    If vertical (angle != 0), returns None to skip processing. Otherwise, returns the original path.
+    
+    Args:
+        image_path (str): Absolute path to the table image.
+        min_confidence (float): Minimum OSD confidence to trust the orientation (default: 0.3).
+    
+    Returns:
+        str or None: Original path if upright, None if vertical (to skip).
+    """
+    if not HAS_PYTESSERACT:
+        print(f"    ⚠️ pytesseract not available; cannot detect vertical tables for {image_path}. Processing as upright.")
+        return image_path
+
+    try:
+        img = Image.open(image_path)
+        osd = pytesseract.image_to_osd(img)
+        angle_match = re.search(r'Orientation in degrees: (\d+)', osd)
+        confidence_match = re.search(r'Orientation confidence: ([\d.]+)', osd)
+        
+        if angle_match and confidence_match:
+            angle = int(angle_match.group(1))
+            confidence = float(confidence_match.group(1))
+            
+            if confidence < min_confidence:
+                print(f"    ⚠️ Low OSD confidence ({confidence} < {min_confidence}) for {image_path}; treating as upright.")
+                return image_path
+                
+            if angle != 0:
+                print(f"    → Detected vertical table ({angle}° rotation, confidence: {confidence}); skipping processing.")
+                return None
+            else:
+                print(f"    ℹ️ Image at {image_path} is upright (0°, confidence: {confidence}).")
+                return image_path
+        else:
+            print(f"    ⚠️ Could not parse OSD output for {image_path}; treating as upright.")
+    except Exception as e:
+        print(f"    ⚠️ Error during vertical table detection for {image_path}: {e}; treating as upright.")
+
+    return image_path  # Fallback to original if detection fails
 
 
 # -----------------------------------------------------------------------------
@@ -172,7 +217,7 @@ ANSWER: [your answer here]
         input_variables=["context_text"],
     )
 
-    TABLE_OCR = "You are an expert OCR engine. Extract all text and structure from the following table image and format it as a clean, complete Markdown table."
+    TABLE_OCR = "Extract all text and structure from the following table image and format it as a clean, complete Markdown table. return only the Markdown table."
 
     TABLE_RELEVANCE = PromptTemplate(
         template="""You are a Cataract surgery expert evaluating a table's suitability for QA. Based on the page text, decide if the table named "{table_name}" is valuable for training.
@@ -329,10 +374,15 @@ def parse_pdf(pdf_path: str) -> Tuple[List[dict], List[Tuple], List[Tuple]]:
             print(f"    → Saved table image: {table_path} (exists? {os.path.exists(table_path)})")
 
             if os.path.exists(table_path):
-                start, end = max(0, page_num - 1), min(len(all_page_texts), page_num + 2)
-                context_text = "\n\n---\n\n".join(all_page_texts[start:end])
-                full_page_text = all_page_texts[page_num]
-                final_tables_data.append((table_path, table_info["name"], context_text, full_page_text, page_num))
+                # Detect if vertical; skip if vertical, else proceed with original path
+                table_path_checked = detect_vertical_table(table_path, min_confidence=0.3)
+                if table_path_checked is not None:
+                    start, end = max(0, page_num - 1), min(len(all_page_texts), page_num + 2)
+                    context_text = "\n\n---\n\n".join(all_page_texts[start:end])
+                    full_page_text = all_page_texts[page_num]
+                    final_tables_data.append((table_path_checked, table_info["name"], context_text, full_page_text, page_num))
+                else:
+                    print(f"    → Skipping vertical table: {table_info['name']}")
             else:
                 print(f"    ⚠️ Warning: expected saved table image not found: {table_path}")
 
