@@ -56,7 +56,7 @@ class Config:
     RUN_TABLE_QA = True
 
     # --- Model Configuration ---
-    LLM_MODEL = "qwen2.5vl:7b"
+    LLM_MODEL = "gemma3:12b"
     VLM_MODEL = "granite3.2-vision:2b"
 
     # Instantiate models in a try/except so local runs don't fail silently
@@ -72,8 +72,6 @@ class Config:
     BASE_DIR = os.getcwd()
     BOOKS_DIR = os.path.join(BASE_DIR, "Books")
     OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-    IMAGE_CACHE_DIR = os.path.join(OUTPUT_DIR, "images")
-    TABLE_CACHE_DIR = os.path.join(OUTPUT_DIR, "tables")
 
 
 # -----------------------------------------------------------------------------
@@ -260,24 +258,24 @@ ANSWER: [your answer here]
     )
 
     QA_QUALITY_CHECK = PromptTemplate(
-        template="""You are a Cataract surgery expert evaluating the quality of a question-answer pair for medical training data.
+        template="""You are a Cataract surgery expert evaluating the quality of a question-answer pair for surgical training data.
 
 Given the question: "{question}"
 
-Is this question specifically about medical content related to Cataract surgery (e.g., techniques, complications, procedures, anatomy, outcomes)? It should not be about non-medical topics like authors, acknowledgments, page numbers, or general book info.
+Is this question specifically about surgical content related to Cataract surgery (e.g., surgical techniques, complications, procedures, intraoperative findings, or surgical outcomes)? It should not be about non-surgical topics like authors, acknowledgments, page numbers, or non-surgical book info.
 
-Respond ONLY with 'true' if it is a high-quality medical QA pair, or 'false' if not.""",
+Respond ONLY with 'true' if it is a high-quality surgical QA pair, or 'false' if not.""",
         input_variables=["question"],
     )
 
     VQA_QUALITY_CHECK = PromptTemplate(
-        template="""You are a Cataract surgery expert evaluating the quality of a Visual Question-Answering pair for medical training data.
+        template="""You are a Cataract surgery expert evaluating the quality of a Visual Question-Answering pair for surgical training data.
 
 Given the question: "{question}"
 
-Is this question specifically about medical content related to Cataract surgery (e.g., techniques, complications, procedures, anatomy, outcomes shown in the figure/image)? It should be phrased referring to 'this figure', 'the image', etc., and not about non-medical topics like authors, acknowledgments, or general book info.
+Is this question specifically about surgical content related to Cataract surgery (e.g., surgical techniques, complications, procedures, intraoperative findings, or surgical outcomes shown in the figure/image)? It should be phrased referring to 'this figure', 'the image', etc., and not about non-surgical topics like authors, acknowledgments, or non-surgical book info.
 
-Respond ONLY with 'true' if it is a high-quality medical VQA pair, or 'false' if not.""",
+Respond ONLY with 'true' if it is a high-quality surgical VQA pair, or 'false' if not.""",
         input_variables=["question"],
     )
 
@@ -298,13 +296,17 @@ class PipelineState(TypedDict):
     vqa_count: int
     qa_count_per_book: int
     vqa_count_per_book: int
+    book_image_dir: str
+    book_table_dir: str
+    book_qa_csv: str
+    book_vqa_csv: str
 
 
 # -----------------------------------------------------------------------------
 # 6. PDF parsing (with ABSOLUTE table/figure image saving, verification, and context)
 # -----------------------------------------------------------------------------
 
-def parse_pdf(pdf_path: str) -> Tuple[List[dict], List[Tuple], List[Tuple]]:
+def parse_pdf(pdf_path: str, image_dir: str, table_dir: str) -> Tuple[List[dict], List[Tuple], List[Tuple]]:
     """Parses a PDF to extract text chunks, image-caption groups, and tables."""
     print(f"📄 Parsing PDF with enhanced figure and table detection: {pdf_path}")
     doc = fitz.open(pdf_path)
@@ -366,7 +368,7 @@ def parse_pdf(pdf_path: str) -> Tuple[List[dict], List[Tuple], List[Tuple]]:
         for table_index, table_info in enumerate(page_tables_info):
             pix = page.get_pixmap(clip=table_info["rect"])
             filename = f"book_{os.path.basename(pdf_path).replace('.pdf', '')}_p{page_num}_t{table_index}_{table_info['name'].replace(' ', '_')}.png"
-            table_path = os.path.join(Config.TABLE_CACHE_DIR, filename)
+            table_path = os.path.join(table_dir, filename)
             ensure_dir(os.path.dirname(table_path))
             pix.save(table_path)
 
@@ -409,7 +411,7 @@ def parse_pdf(pdf_path: str) -> Tuple[List[dict], List[Tuple], List[Tuple]]:
                 context_text = "\n\n---\n\n".join(all_page_texts[start:end])
                 xref = img[0]
                 base_image = doc.extract_image(xref)
-                img_path = os.path.join(Config.IMAGE_CACHE_DIR, f"book_{os.path.basename(pdf_path).replace('.pdf', '')}_p{page_num}_i{img_index}.png")
+                img_path = os.path.join(image_dir, f"book_{os.path.basename(pdf_path).replace('.pdf', '')}_p{page_num}_i{img_index}.png")
                 ensure_dir(os.path.dirname(img_path))
                 with open(img_path, "wb") as f:
                     f.write(base_image["image"])
@@ -442,12 +444,28 @@ def convert_csv_to_jsonl(csv_path: str, jsonl_path: str):
 
 def parse_current_book_node(state: PipelineState) -> dict:
     pdf_path = state["pdf_paths"][state["current_book_index"]]
+    book_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    book_output_dir = os.path.join(Config.OUTPUT_DIR, book_name)
+    ensure_dir(book_output_dir)
+    book_image_dir = os.path.join(book_output_dir, "images")
+    ensure_dir(book_image_dir)
+    book_table_dir = os.path.join(book_output_dir, "tables")
+    ensure_dir(book_table_dir)
+    book_qa_csv = os.path.join(book_output_dir, "qa_pairs.csv")
+    book_vqa_csv = os.path.join(book_output_dir, "vqa_pairs.csv")
+
     print(f"\n🚀 Starting processing for book {state['current_book_index'] + 1}: {pdf_path}")
-    chunks, images, tables = parse_pdf(pdf_path)
+    chunks, images, tables = parse_pdf(pdf_path, book_image_dir, book_table_dir)
     return {
+        "book_image_dir": book_image_dir,
+        "book_table_dir": book_table_dir,
+        "book_qa_csv": book_qa_csv,
+        "book_vqa_csv": book_vqa_csv,
         "text_chunks": chunks,
         "images_with_page_text": images,
         "table_data": tables,
+        "qa_pairs": [],
+        "vqa_pairs": [],
         "qa_count_per_book": 0,
         "vqa_count_per_book": 0,
     }
@@ -745,6 +763,27 @@ def generate_table_qa_node(state: PipelineState) -> dict:
     }
 
 
+def save_book_data_node(state: PipelineState) -> dict:
+    qa_pairs = state["qa_pairs"]
+    vqa_pairs = state["vqa_pairs"]
+    book_qa_csv = state["book_qa_csv"]
+    book_vqa_csv = state["book_vqa_csv"]
+
+    print("\n💾 Saving results for current book...")
+
+    if qa_pairs:
+        pd.DataFrame(qa_pairs).to_csv(book_qa_csv, index=False, encoding='utf-8')
+        print(f"Saved {len(qa_pairs)} QA pairs to {book_qa_csv}")
+        convert_csv_to_jsonl(book_qa_csv, book_qa_csv.replace(".csv", ".jsonl"))
+
+    if vqa_pairs:
+        pd.DataFrame(vqa_pairs).to_csv(book_vqa_csv, index=False, encoding='utf-8')
+        print(f"Saved {len(vqa_pairs)} VQA pairs to {book_vqa_csv}")
+        convert_csv_to_jsonl(book_vqa_csv, book_vqa_csv.replace(".csv", ".jsonl"))
+
+    return state
+
+
 # -----------------------------------------------------------------------------
 # 10. Workflow graph and execution (added quality check nodes)
 # -----------------------------------------------------------------------------
@@ -758,6 +797,7 @@ workflow.add_node("vqa_quality_check", RunnableLambda(vqa_quality_check_node))
 workflow.add_node("generate_qa", RunnableLambda(generate_qa_node))
 workflow.add_node("generate_table_qa", RunnableLambda(generate_table_qa_node))
 workflow.add_node("qa_quality_check", RunnableLambda(qa_quality_check_node))
+workflow.add_node("save_book_data", RunnableLambda(save_book_data_node))
 
 
 def advance_to_next_book(state: PipelineState) -> dict:
@@ -772,6 +812,7 @@ workflow.add_edge("generate_vqa", "vqa_quality_check")
 workflow.add_edge("vqa_quality_check", "generate_qa")
 workflow.add_edge("generate_qa", "generate_table_qa")
 workflow.add_edge("generate_table_qa", "qa_quality_check")
+workflow.add_edge("qa_quality_check", "save_book_data")
 
 
 def book_router(state: PipelineState) -> str:
@@ -782,7 +823,7 @@ def book_router(state: PipelineState) -> str:
     print(f"🏁 Finished book {state['current_book_index'] + 1}. Moving to next...")
     return "next_book"
 
-workflow.add_conditional_edges("qa_quality_check", book_router, {"next_book": "advance_book", END: END})
+workflow.add_conditional_edges("save_book_data", book_router, {"next_book": "advance_book", END: END})
 workflow.add_edge("advance_book", "parse")
 
 app = workflow.compile()
@@ -794,8 +835,6 @@ app = workflow.compile()
 
 def main():
     ensure_dir(Config.OUTPUT_DIR)
-    ensure_dir(Config.IMAGE_CACHE_DIR)
-    ensure_dir(Config.TABLE_CACHE_DIR)
 
     pdf_paths = [os.path.join(Config.BOOKS_DIR, f) for f in os.listdir(Config.BOOKS_DIR) if f.lower().endswith(".pdf")]
     if not pdf_paths:
@@ -816,6 +855,10 @@ def main():
         vqa_count=0,
         qa_count_per_book=0,
         vqa_count_per_book=0,
+        book_image_dir="",
+        book_table_dir="",
+        book_qa_csv="",
+        book_vqa_csv="",
     )
 
     result = None
@@ -830,22 +873,6 @@ def main():
         print(f"❌ An unexpected error occurred: {e}")
     finally:
         if result:
-            print("\n💾 Saving results...")
-
-            qa_csv_path = os.path.join(Config.OUTPUT_DIR, "qa_pairs.csv")
-            vqa_csv_path = os.path.join(Config.OUTPUT_DIR, "vqa_pairs.csv")
-
-            if result.get("qa_pairs"):
-                pd.DataFrame(result["qa_pairs"]).to_csv(qa_csv_path, index=False, encoding='utf-8')
-                print(f"Saved {len(result['qa_pairs'])} QA pairs to {qa_csv_path}")
-
-            if result.get("vqa_pairs"):
-                pd.DataFrame(result["vqa_pairs"]).to_csv(vqa_csv_path, index=False, encoding='utf-8')
-                print(f"Saved {len(result['vqa_pairs'])} VQA pairs to {vqa_csv_path}")
-
-            convert_csv_to_jsonl(qa_csv_path, qa_csv_path.replace(".csv", ".jsonl"))
-            convert_csv_to_jsonl(vqa_csv_path, vqa_csv_path.replace(".csv", ".jsonl"))
-
             print("\n📝 --- Final Report ---")
             print(f"Total QA pairs extracted:  {result.get('qa_count', 0)} 🚀")
             print(f"Total VQA pairs extracted: {result.get('vqa_count', 0)} 👁️")
