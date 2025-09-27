@@ -129,12 +129,19 @@ QA_VQA_generation_from_pdf/
 python VQA_from_book.py
 ```
 
-### Output Files
-For each processed book, the script generates:
-- `output/<book_name>/qa_pairs.csv` and `.jsonl`: Text and table QA pairs
-- `output/<book_name>/vqa_pairs.csv` and `.jsonl`: Visual QA pairs
-- `output/<book_name>/images/`: Extracted figures
-- `output/<book_name>/tables/`: Extracted tables
+## Output Structure
+
+For each processed book, the script creates the following directory structure:
+```
+output/
+└── <book_name>/
+    ├── qa_pairs.csv       # Text QA pairs
+    ├── qa_pairs.jsonl     # Text QA pairs (JSON Lines)
+    ├── vqa_pairs.csv       # Visual QA pairs
+    ├── vqa_pairs.jsonl     # Visual QA pairs (JSON Lines)
+    ├── images/            # Extracted figures
+    └── tables/            # Extracted tables
+```
 
 ## Troubleshooting
 
